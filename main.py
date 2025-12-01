@@ -458,17 +458,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await query.edit_message_text(stats_text, parse_mode=ParseMode.HTML)
 
-async def keep_alive(context: ContextTypes.DEFAULT_TYPE):
-    """Keep bot alive with periodic ping"""
-    logger.info("Bot is alive! ✅")
-
 def main():
     """Start the bot"""
     if not BOT_TOKEN:
         logger.error("BOT_TOKEN not found in environment variables!")
         return
     
-    # Create application
+    # Create application without JobQueue (not needed for basic functionality)
     application = Application.builder().token(BOT_TOKEN).build()
     
     # Add handlers
@@ -477,11 +473,11 @@ def main():
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     application.add_handler(CallbackQueryHandler(button_callback))
     
-    # Add keep-alive job (every minute)
-    application.job_queue.run_repeating(keep_alive, interval=60, first=10)
-    
     # Start bot
-    logger.info("Bot started! 🚀")
+    logger.info("🚀 Bot started successfully!")
+    logger.info("📝 Ready to convert HTML files to TXT format")
+    logger.info("✅ All systems operational")
+    
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
