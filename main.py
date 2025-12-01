@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🤖 Telegram HTML to TXT Converter Bot - NUCLEAR EDITION
-✨ Extracts EVERYTHING: Videos, PDFs, Notes, Drive Links
-🚀 Fixes missing PDFs in encrypted files
+🤖 Telegram HTML to TXT Converter Bot - GOD MODE
+✨ Smart Context Extraction: Finds real titles even if link says "View PDF"
+🚀 Deep Decryption for Encrypted Batches
 """
 
 import os
@@ -11,7 +11,7 @@ import re
 import logging
 import base64
 import asyncio
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.constants import ParseMode
@@ -29,16 +29,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class NuclearHTMLParser:
-    """🔥 Aggressive Parser to catch Videos AND PDFs"""
+class GodModeParser:
+    """🧠 Smart Parser that understands HTML structure to find Names & Links"""
     
     def __init__(self):
-        # Broad extension matching
-        self.video_ext = ['.m3u8', '.mp4', '.mkv', 'youtu', 'vimeo', 'playlist']
-        self.pdf_ext = ['.pdf', 'drive.google', 'docs.google', 'viewpdf', 'doc', 'ppt']
+        # Generic words to ignore in titles
+        self.generic_keywords = [
+            'view', 'play', 'download', 'watch', 'pdf', 'notes', 'video', 
+            'click here', 'open', 'attachment', 'class png', 'live'
+        ]
         
     def xor_decrypt(self, encoded_b64, key):
-        """Decryption Logic for Selection/Mains Batch"""
+        """Standard XOR Decryption for Selection Batch & others"""
         try:
             encrypted_data = base64.b64decode(encoded_b64).decode('latin1')
             result = []
@@ -46,13 +48,12 @@ class NuclearHTMLParser:
             for i in range(len(encrypted_data)):
                 char_code = ord(encrypted_data[i]) ^ ord(key[i % key_len])
                 result.append(chr(char_code))
-            decrypted_layer = "".join(result)
-            return base64.b64decode(decrypted_layer).decode('utf-8')
+            return base64.b64decode("".join(result)).decode('utf-8')
         except Exception as e:
-            logger.error(f"Decryption error: {e}")
             return None
 
     def extract_secret_key(self, html_content):
+        """Extracts secret key components from JS"""
         default_key = "TusharSuperSecreT2025!"
         try:
             p1 = re.search(r'let\s+P1\s*=\s*["\']([^"\']+)["\']', html_content)
@@ -61,211 +62,224 @@ class NuclearHTMLParser:
             p4 = re.search(r'let\s+P4\s*=\s*["\']([^"\']+)["\']', html_content)
             
             if p1 and p2 and p3 and p4:
-                part3 = p3.group(1)[::-1]
-                return f"{p4.group(1)}{p1.group(1)}{p2.group(1)}{part3}"
+                return f"{p4.group(1)}{p1.group(1)}{p2.group(1)}{p3.group(1)[::-1]}"
             return default_key
         except:
             return default_key
 
-    def detect_and_decrypt(self, html_content):
-        if "encodedContent" in html_content:
-            logger.info("🔒 Encrypted content found, decrypting...")
-            match = re.search(r"encodedContent\s*=\s*['\"]([^'\"]+)['\"]", html_content)
-            if match:
-                key = self.extract_secret_key(html_content)
-                decrypted = self.xor_decrypt(match.group(1), key)
-                if decrypted: return decrypted
-        return html_content
+    def get_smart_title(self, element, default_text="Untitled"):
+        """
+        🚀 The Magic Function:
+        Looks at the element, then its neighbors, then its parent to find the REAL name.
+        """
+        # 1. Get own text
+        text = element.get_text(" ", strip=True)
+        
+        # 2. Check if text is 'Generic' (like "View PDF") or empty
+        is_generic = False
+        if not text or len(text) < 4:
+            is_generic = True
+        else:
+            if any(kw in text.lower() for kw in self.generic_keywords):
+                # But allow if it has numbers or specific details (e.g. "Class 5 PDF")
+                if len(text) < 20: 
+                    is_generic = True
 
-    def clean_title(self, text):
-        if not text: return "Untitled"
+        if not is_generic:
+            return self.clean_text(text)
+
+        # 3. Context Search (If generic)
+        
+        # A) Look for previous sibling (often <strong>Name</strong> <a...>View</a>)
+        prev = element.find_previous_sibling()
+        if prev:
+            prev_text = prev.get_text(" ", strip=True)
+            if len(prev_text) > 3:
+                return self.clean_text(prev_text)
+
+        # B) Look at Parent's text (ignoring the button text itself)
+        parent = element.parent
+        if parent:
+            # Get parent text but remove the link's own text from it to avoid duplication
+            full_parent_text = parent.get_text(" ", strip=True)
+            # Simple heuristic: If parent text is longer, use it
+            if len(full_parent_text) > len(text) + 3:
+                # Remove the generic word from parent text
+                clean_parent = full_parent_text.replace(text, "").strip()
+                if len(clean_parent) > 3:
+                    return self.clean_text(clean_parent)
+        
+        # C) Look for nearest Header/Strong preceding the element
+        nearest_strong = element.find_previous(['strong', 'h3', 'h4', 'h5', 'b', 'span'])
+        if nearest_strong:
+            return self.clean_text(nearest_strong.get_text(" ", strip=True))
+
+        return default_text
+
+    def clean_text(self, text):
+        # Basic cleanup
         text = re.sub(r'\s+', ' ', text).strip()
-        # Remove common buttons text
-        text = re.sub(r'(Play|View|Download|Watch|Video|PDF|Class)', '', text, flags=re.IGNORECASE)
-        return text.strip() if text.strip() else "Untitled"
+        # Remove trailing colons or dashes
+        text = text.strip(':-| ')
+        return text
 
     def parse(self, html_content):
-        # 1. Decrypt
-        final_html = self.detect_and_decrypt(html_content)
-        soup = BeautifulSoup(final_html, 'lxml')
+        # 1. Decrypt Loop (Handle multiple layers if needed, but usually 1)
+        if "encodedContent" in html_content:
+            key = self.extract_secret_key(html_content)
+            match = re.search(r"encodedContent\s*=\s*['\"]([^'\"]+)['\"]", html_content)
+            if match:
+                decrypted = self.xor_decrypt(match.group(1), key)
+                if decrypted: html_content = decrypted
+
+        soup = BeautifulSoup(html_content, 'lxml') # or 'html.parser'
         
-        links_data = {'videos': [], 'pdfs': [], 'others': []}
+        links_data = [] # List of dicts: {'title':..., 'url':..., 'type':...}
         seen_urls = set()
 
-        page_title = soup.title.string.strip() if soup.title else "Extracted_Content"
-
-        # 2. Strategy A: Standard Tags (<a>)
-        for a in soup.find_all('a'):
-            raw_text = a.get_text()
-            title = self.clean_title(raw_text)
+        # 2. Universal Element Scanner
+        # We look for ANY element that might have a link
+        targets = soup.find_all(['a', 'button', 'div', 'li', 'span'])
+        
+        for tag in targets:
+            url = None
             
-            # Check href
-            href = a.get('href')
-            if href: self.process_link(title, href, links_data, seen_urls)
+            # A) Check href
+            if tag.name == 'a' and tag.get('href'):
+                url = tag.get('href')
             
-            # Check onclick (Critical for PDFs in these batches)
-            onclick = a.get('onclick')
-            if onclick:
-                # Catch patterns like viewPdf('url') or playVideo('url')
-                urls = re.findall(r"['\"](https?://[^'\"]+)['\"]", onclick)
-                for url in urls:
-                    # If title is empty, try to find a sibling text
-                    if title == "Untitled":
-                        parent = a.find_parent()
-                        if parent: title = self.clean_title(parent.get_text())
-                    self.process_link(title, url, links_data, seen_urls)
-
-        # 3. Strategy B: Global Regex Sweep (Fallback for hidden links)
-        # This finds links that are just in the script variables but not in <a> tags
-        # Format: "Title" : "URL" or just URLs
-        
-        # Find all https links in the raw text
-        raw_links = re.findall(r'(https?://[^\s<>"\';]+)', final_html)
-        for url in raw_links:
-            # We assume untitled for raw regex matches unless we can map them
-            # This is a fallback to ensure NOTHING is missed
-            self.process_link("Direct Link (Raw)", url, links_data, seen_urls)
-
-        return page_title, links_data
-
-    def process_link(self, title, url, data, seen_urls):
-        url = url.strip()
-        if not url.startswith('http'): return
-        if url in seen_urls: return
-        
-        seen_urls.add(url)
-        item = {'title': title, 'url': url}
-
-        # Categorization Logic
-        url_lower = url.lower()
-        title_lower = title.lower()
-
-        is_video = any(x in url_lower for x in self.video_ext)
-        is_pdf = any(x in url_lower for x in self.pdf_ext)
-        
-        # If URL is generic, check title
-        if not is_video and not is_pdf:
-            if 'pdf' in title_lower or 'notes' in title_lower:
-                is_pdf = True
-            elif 'video' in title_lower or 'class' in title_lower:
-                is_video = True
-
-        if is_video:
-            data['videos'].append(item)
-        elif is_pdf:
-            data['pdfs'].append(item)
-        else:
-            # If it's a very long link, it might be a signed URL, put in others
-            data['others'].append(item)
-
-    def generate_txt(self, title, data):
-        lines = []
-        lines.append(f"📂 {title}")
-        lines.append("="*40 + "\n")
-        
-        # Format: Name : Link
-        
-        if data['videos']:
-            lines.append(f"🎬 VIDEOS ({len(data['videos'])})")
-            for v in data['videos']:
-                lines.append(f"{v['title']} : {v['url']}")
-            lines.append("")
+            # B) Check onclick (The juicy stuff for encrypted batches)
+            elif tag.get('onclick'):
+                # Extract URL from onclick="...('URL')..."
+                # Supports single/double quotes, http/https
+                onclick_match = re.search(r"['\"](https?://[^'\"]+)['\"]", tag.get('onclick'))
+                if onclick_match:
+                    url = onclick_match.group(1)
             
-        if data['pdfs']:
-            lines.append(f"📚 PDFs / NOTES ({len(data['pdfs'])})")
-            for p in data['pdfs']:
-                lines.append(f"{p['title']} : {p['url']}")
-            lines.append("")
-            
-        if data['others']:
-            lines.append(f"🔗 OTHER LINKS ({len(data['others'])})")
-            for o in data['others']:
-                lines.append(f"{o['title']} : {o['url']}")
+            # Process if URL found
+            if url and url.startswith('http') and url not in seen_urls:
+                seen_urls.add(url)
                 
+                # SMART TITLE EXTRACTION
+                title = self.get_smart_title(tag)
+                
+                # Determine Type
+                l_type = "other"
+                u_lower = url.lower()
+                if any(x in u_lower for x in ['.pdf', 'drive.google', 'doc', 'ppt']):
+                    l_type = "pdf"
+                elif any(x in u_lower for x in ['.mp4', '.m3u8', 'youtube', 'youtu.be', 'vimeo', 'playlist']):
+                    l_type = "video"
+                # If title contains keywords, override type
+                elif 'pdf' in title.lower() or 'notes' in title.lower():
+                    l_type = "pdf"
+                
+                links_data.append({'title': title, 'url': url, 'type': l_type})
+
+        # 3. Fallback: Regex for loose strings (Only if soup failed for a URL)
+        # Sometimes URLs are just in script tags
+        raw_urls = re.findall(r'(https?://[^\s<>"\';]+)', html_content)
+        for r_url in raw_urls:
+            if r_url not in seen_urls:
+                # Basic filter to avoid garbage JS urls
+                if not any(x in r_url for x in ['.js', '.css', 'w3.org']):
+                    seen_urls.add(r_url)
+                    links_data.append({'title': "Hidden Link (Regex)", 'url': r_url, 'type': "other"})
+
+        return links_data
+
+    def generate_output(self, file_name, links):
+        lines = [f"📂 Source: {file_name}", "="*40, ""]
+        
+        # Categorize for display
+        videos = [x for x in links if x['type'] == 'video']
+        pdfs = [x for x in links if x['type'] == 'pdf']
+        others = [x for x in links if x['type'] == 'other']
+        
+        if videos:
+            lines.append(f"🎬 VIDEOS ({len(videos)})")
+            for v in videos: lines.append(f"{v['title']} : {v['url']}")
+            lines.append("")
+            
+        if pdfs:
+            lines.append(f"📚 PDFS / NOTES ({len(pdfs)})")
+            for p in pdfs: lines.append(f"{p['title']} : {p['url']}")
+            lines.append("")
+            
+        if others:
+            lines.append(f"🔗 OTHERS ({len(others)})")
+            for o in others: lines.append(f"{o['title']} : {o['url']}")
+            
         return "\n".join(lines)
 
 # ==================== BOT HANDLERS ====================
-parser = NuclearHTMLParser()
+parser = GodModeParser()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("☢️ **Nuclear HTML Parser Active**\nDrop your HTML file. I will extract Videos, PDFs, and everything else.")
+    await update.message.reply_text("😎 **God Mode Active**\nSend HTML. I will find real names and ALL links.")
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
-    file_name = doc.file_name
-    
-    if not (file_name.endswith('.html') or file_name.endswith('.htm') or file_name.endswith('.txt')):
-        await update.message.reply_text("❌ Please send HTML file.")
+    if not doc.file_name.lower().endswith(('.html', '.htm', '.txt')):
+        await update.message.reply_text("❌ Send HTML file.")
         return
 
-    status_msg = await update.message.reply_text("🔄 **Scanning Deep Layers...**")
+    status = await update.message.reply_text("🔍 **Analyzing Structure...**")
     
     try:
-        new_file = await context.bot.get_file(doc.file_id)
-        file_content = await new_file.download_as_bytearray()
-        html_text = file_content.decode('utf-8', errors='ignore')
+        f = await context.bot.get_file(doc.file_id)
+        content = await f.download_as_bytearray()
+        html_text = content.decode('utf-8', errors='ignore')
         
-        title, links = parser.parse(html_text)
-        output_text = parser.generate_txt(title, links)
+        links = parser.parse(html_text)
         
-        total_found = len(links['videos']) + len(links['pdfs']) + len(links['others'])
-        
-        if total_found == 0:
-            await status_msg.edit_text("⚠️ Found 0 links. The file might be empty or format is unsupported.")
+        if not links:
+            await status.edit_text("❌ No links found.")
             return
             
-        out_filename = f"{file_name}_extracted.txt"
-        with open(out_filename, "w", encoding="utf-8") as f:
-            f.write(output_text)
+        output = parser.generate_output(doc.file_name, links)
+        
+        out_name = f"{doc.file_name}_Fixed.txt"
+        with open(out_name, "w", encoding="utf-8") as f:
+            f.write(output)
             
-        with open(out_filename, "rb") as f:
+        with open(out_name, "rb") as f:
             await update.message.reply_document(
                 document=f,
-                caption=f"✅ **Extraction Success**\nTotal: {total_found}\n📹 Vid: {len(links['videos'])}\n📚 PDF: {len(links['pdfs'])}\n🔗 Oth: {len(links['others'])}",
+                caption=f"✅ **Extracted Successfully**\nTotal: {len(links)}",
                 parse_mode=ParseMode.MARKDOWN
             )
-        
-        os.remove(out_filename)
-        await status_msg.delete()
+        os.remove(out_name)
+        await status.delete()
         
     except Exception as e:
         logger.error(e)
-        await status_msg.edit_text(f"❌ Error: {str(e)}")
+        await status.edit_text("❌ Error processing file.")
 
 # ==================== SERVER ====================
-async def health_check(request):
-    return web.Response(text="Alive", status=200)
-
-async def start_server():
-    app = web.Application()
-    app.router.add_get('/', health_check)
-    app.router.add_get('/health', health_check)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', PORT)
-    await site.start()
+async def health(r): return web.Response(text="OK")
 
 async def main():
-    await start_server()
-    if not BOT_TOKEN: return
+    app = web.Application()
+    app.router.add_get('/', health)
+    app.router.add_get('/health', health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, '0.0.0.0', PORT).start()
     
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    if not BOT_TOKEN: return
+    application = Application.builder().token(BOT_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     
     if WEBHOOK_URL:
-        await app.bot.set_webhook(f"{WEBHOOK_URL}/webhook")
+        await application.bot.set_webhook(f"{WEBHOOK_URL}/webhook")
         
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)
-    
-    stop_signal = asyncio.Future()
-    await stop_signal
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling(drop_pending_updates=True)
+    await asyncio.Future()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    asyncio.run(main())
                 
