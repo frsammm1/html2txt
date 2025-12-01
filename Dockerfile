@@ -1,37 +1,33 @@
-# Optimized for Render.com 512MB Free Tier
+# Python 3.11 Slim (Lightweight)
 FROM python:3.11-slim
 
-# Set working directory
+# Set env variables to prevent .pyc files and buffer
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# Set work directory
 WORKDIR /app
 
-# Install system dependencies (minimal)
+# Install system dependencies required for lxml
+# --no-install-recommends helps keep image small
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
+    libxml2-dev \
+    libxslt-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements
+# Copy requirements first (Caching layer)
 COPY requirements.txt .
 
-# Install Python dependencies
+# Install python libs
+# --only-binary saves compilation time
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# Copy code
 COPY main.py .
 
-# Create temp directory
-RUN mkdir -p /tmp/bot_files
-
-# Set environment variables
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PORT=8080
-
-# Expose port for Render health check
+# Expose port for Render
 EXPOSE 8080
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"
-
-# Run the bot
-CMD ["python", "-u", "main.py"]
+# Command to run
+CMD ["python", "main.py"]
