@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🤖 Telegram HTML to TXT Converter - FINAL STABLE
-✨ Fixes: Removes Duplicate Links (360p/480p/720p), Fixes Bad PDF Names
-🚀 Logic: Aggressive Context Merging & Title Deduplication
+🤖 Telegram HTML to TXT Converter - VISUAL BLOCK PARSER (FINAL)
+✨ Logic: Identifies 'Cards', Extracts Pure Titles, Removes ALL Duplicates
+🚀 Fixes: Garbage Titles, Repeating Links, Mixed Categories
 """
 
 import os
@@ -30,120 +30,112 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class FinalParser:
+class VisualBlockParser:
     def __init__(self):
-        self.ignore_words = [
+        # Strictly ignore these words to clean titles
+        self.junk_words = [
             'view', 'play', 'download', 'watch', 'pdf', 'notes', 'video', 
             'click here', 'open', 'original', 'quality', '360p', '480p', '720p', '1080p',
-            'class png', 'live', 'read online', 'attempt', 'start', 'test', 'discussion'
+            'class png', 'live', 'read online', 'attempt', 'start', 'test', 'discussion',
+            'quality', 'hls', 'media'
         ]
         
     def clean_url(self, url):
         if not url: return None
-        # Marshmallow fix
+        # Fix Wrapper Links
         if "video=" in url:
             try:
                 qs = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
                 if 'video' in qs: return qs['video'][0]
             except: pass
         
-        # Double extension fix
+        # Remove Double Extensions
         if '.m3u8' in url: url = url.split('.m3u8')[0] + '.m3u8'
         if '.pdf' in url: url = url.split('.pdf')[0] + '.pdf'
         return url.strip()
 
-    def clean_title(self, text):
+    def clean_name(self, text):
+        """Ultra-Strict Cleaner to get ONLY the topic name"""
         if not text: return ""
-        # Remove unwanted characters
+        
+        # 1. Remove Button Words (Case Insensitive)
+        for word in self.junk_words:
+            text = re.sub(f'(?i)\\b{word}\\b', '', text)
+            
+        # 2. Remove Symbols & weird chars
         text = text.replace('|', ' ').replace('_', ' ').replace(':', ' - ')
+        
+        # 3. Remove Starting Numbers/Dots (e.g. "1.", "01", "23.")
+        # Only if they are at the very start
+        text = re.sub(r'^\s*\d+[\.\-\)]\s*', '', text)
+        
+        # 4. Collapse multiple spaces
         text = re.sub(r'\s+', ' ', text).strip()
         
-        # Remove starting numbers (e.g. "1.", "01") ONLY if followed by generic text
-        # But for "Class 01", we keep it.
-        # This regex removes standalone numbers at start: "1. "
-        text = re.sub(r'^\d+[\.\-\)]\s*', '', text)
-        
-        return text.strip()
+        return text
 
-    def is_generic(self, text):
-        """Checks if title is too generic (like 'View PDF')"""
-        if not text or len(text) < 3: return True
-        t_low = text.lower()
-        if t_low in self.ignore_words: return True
-        # If text is just "Discussion" or "Solution"
-        if t_low in ['discussion', 'solution', 'paper', 'class']: return True
-        return False
-
-    def get_context_title(self, element):
+    def get_card_title(self, element):
         """
-        🧬 MERGES context from Parent and Grandparent to form a full title.
-        Example: Parent="Mock 1", Element="Discussion" -> Result="Mock 1 Discussion"
+        🔍 Looks for the Container (Card) holding the link.
+        It scans the Parent Div to find the longest non-junk text.
         """
-        # 1. Start with the element's own text (or JS title)
-        title_parts = []
-        
-        # Check JS
+        # First, try JS Title (Most Accurate)
         if element.has_attr('onclick'):
             matches = re.findall(r"['\"]([^'\"]+)['\"]", element['onclick'])
             if len(matches) >= 3:
                 js_title = matches[-1].strip()
-                if not js_title.startswith('http'): title_parts.append(js_title)
+                if len(js_title) > 3 and "http" not in js_title:
+                    return self.clean_name(js_title)
 
-        # Check Button Text
-        btn_text = element.get_text(" ", strip=True)
-        if btn_text and not self.is_generic(btn_text):
-            title_parts.append(btn_text)
-
-        # 2. Walk Up (Parent -> Grandparent)
+        # Fallback: Parent Div Analysis
         current = element
+        btn_text = element.get_text(" ", strip=True)
+        
+        # Go up to finding a Block (div/li)
         for _ in range(3):
             parent = current.parent
             if not parent: break
             
-            # Get parent text, but exclude the text of the child we just came from
-            parent_text = parent.get_text(" ", strip=True)
+            # Get all text in this block
+            block_text = parent.get_text(" ", strip=True)
             
-            # Simple heuristic: If parent text contains the child text, try to subtract it
-            # But safer is just to grab the longest meaningful line in parent
+            # Remove the button text itself from block text
+            clean_block = block_text.replace(btn_text, "").strip()
             
-            # Split parent text by newlines/separators
-            lines = re.split(r'[\n•|]+', parent_text)
-            for line in lines:
-                line = self.clean_title(line)
-                # If this line is unique and substantial, add it
-                if len(line) > 4 and line not in title_parts and not self.is_generic(line):
-                    # Prepend parent text (Topic) before Child text (Sub-topic)
-                    title_parts.insert(0, line)
-                    break # Only take the main heading from parent
+            # Split lines and find the most 'Title-like' line
+            # We reject lines that are just numbers or junk
+            candidates = re.split(r'[\n•]+', clean_block)
+            best_candidate = ""
             
+            for part in candidates:
+                cleaned = self.clean_name(part)
+                if len(cleaned) > 4: # Must be at least 4 chars to be a topic
+                    # If this looks like a valid title, take it
+                    if not best_candidate or len(cleaned) > len(best_candidate):
+                        best_candidate = cleaned
+            
+            if best_candidate:
+                return best_candidate
+                
             current = parent
             
-        # 3. Join parts
-        if not title_parts: return "Untitled_Resource"
-        
-        # Deduplicate parts if "Mock 1" appears twice
-        seen = set()
-        final_parts = []
-        for p in title_parts:
-            if p.lower() not in seen:
-                final_parts.append(p)
-                seen.add(p.lower())
-                
-        return " ".join(final_parts)
+        return "Untitled Topic"
 
     def parse(self, html_content):
+        # Decode if needed
         if "encodedContent" in html_content:
-            try: pass # Add decryption if needed, usually decoded content works
+            try: pass 
             except: pass
 
         soup = BeautifulSoup(html_content, 'lxml')
         links_data = []
         
-        # Track seen titles per category to prevent duplicates (360p vs 720p)
-        # Structure: {'video': {'noun class 1'}, 'pdf': set()}
-        seen_titles = {'video': set(), 'pdf': set(), 'mock': set(), 'other': set(), 'image': set()}
+        # DEDUPLICATION SETS
+        # We store titles we've already processed to avoid adding 360p/720p duplicates
+        seen_titles = {'video': set(), 'pdf': set(), 'mock': set(), 'image': set(), 'other': set()}
         seen_urls = set()
 
+        # Find all link elements
         targets = soup.find_all(lambda tag: tag.has_attr('href') or tag.has_attr('onclick'))
 
         for tag in targets:
@@ -155,42 +147,40 @@ class FinalParser:
 
             if url and "http" in url:
                 clean_url = self.clean_url(url)
-                if any(x in clean_url for x in ['w3.org', 'javascript:', 'jquery']): continue
                 
-                # Check URL duplication
+                # Filter Technical Junk
+                if any(x in clean_url for x in ['w3.org', 'javascript:', 'jquery', 'google.com']):
+                    continue
+
                 if clean_url in seen_urls: continue
                 
-                # Title Extraction
-                raw_title = self.get_context_title(tag)
-                title = self.clean_title(raw_title)
+                # Get Title using Visual Block Logic
+                title = self.get_card_title(tag)
                 
-                # CATEGORIZATION
+                # CATEGORIZE
                 l_type = 'other'
                 u_low = clean_url.lower()
                 t_low = title.lower()
                 
-                # Video
+                # 1. Video (Strict)
                 if any(x in u_low for x in ['.mp4', '.m3u8', 'youtu', 'vimeo', 'manifest']):
                     l_type = 'video'
-                # PDF
+                # 2. PDF (Strict)
                 elif any(x in u_low for x in ['.pdf', 'drive.google', 'doc', 'notes']):
                     l_type = 'pdf'
-                # Mock (Strict: Must imply a test platform or quiz)
-                elif ('test' in u_low or 'quiz' in u_low) and not ('.mp4' in u_low or '.m3u8' in u_low):
+                # 3. Mock (Only if URL contains test/quiz AND not video)
+                elif ('test' in u_low or 'quiz' in u_low or 'attempt' in u_low):
                     l_type = 'mock'
-                elif 'attempt' in t_low:
-                    l_type = 'mock'
-                # Image
+                # 4. Image
                 elif any(x in u_low for x in ['.jpg', '.png', '.jpeg']):
                     l_type = 'image'
                 
-                # DEDUPLICATION LOGIC (The Fix)
-                # If we have already seen this TITLE in this CATEGORY, skip it!
-                # This drops the 2nd, 3rd links (lower quality duplicates)
+                # DUPLICATE CHECK
+                # If we already have a VIDEO with this Exact Title, Skip this one (it's likely a lower quality link)
                 if title in seen_titles[l_type]:
                     continue
                 
-                # Register
+                # Add to list
                 seen_titles[l_type].add(title)
                 seen_urls.add(clean_url)
                 
@@ -201,25 +191,26 @@ class FinalParser:
     def generate_txt(self, filename, links):
         lines = [f"📂 Source: {filename}", "="*50, ""]
         
+        # Order: Video -> PDF -> Mock -> Image -> Other
         cats = ['video', 'pdf', 'mock', 'image', 'other']
-        names = ['🎬 VIDEOS', '📚 PDFS / NOTES', '📝 MOCK TESTS', '🖼 IMAGES', '🔗 OTHERS']
+        headers = ['🎬 VIDEOS', '📚 PDFS / NOTES', '📝 MOCK TESTS', '🖼 IMAGES', '🔗 OTHERS']
         
-        for cat, name in zip(cats, names):
-            items = [x for x in links if x['type'] == cat]
+        for c, h in zip(cats, headers):
+            items = [x for x in links if x['type'] == c]
             if items:
-                lines.append(f"{name} ({len(items)})")
+                lines.append(h + f" ({len(items)})")
                 lines.append("-" * 20)
                 for item in items:
                     lines.append(f"{item['title']} : {item['url']}")
                 lines.append("")
-            
+        
         return "\n".join(lines)
 
 # ==================== BOT SETUP ====================
-parser = FinalParser()
+parser = VisualBlockParser()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🛡️ **Anti-Dupe Bot**\nSend HTML. I remove duplicates & fix names.")
+    await update.message.reply_text("🤖 **Visual Parser Active**\nSend HTML. I will extract clean titles and remove duplicates.")
 
 async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
@@ -227,7 +218,7 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Send HTML file.")
         return
 
-    msg = await update.message.reply_text("♻️ **Filtering Duplicates...**")
+    msg = await update.message.reply_text("👁️ **Visualizing & Cleaning...**")
     
     try:
         f = await context.bot.get_file(doc.file_id)
@@ -241,7 +232,7 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
             
         out_txt = parser.generate_txt(doc.file_name, links)
-        out_name = f"{doc.file_name}_Final.txt"
+        out_name = f"{doc.file_name}_Cleaned.txt"
         
         with open(out_name, "w", encoding="utf-8") as f:
             f.write(out_txt)
@@ -251,7 +242,7 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             count = len([x for x in links if x['type'] == t])
             stats.append(f"{t.title()}: {count}")
             
-        caption = f"✅ **Cleaned & Fixed**\n" + " | ".join(stats)
+        caption = f"✅ **Extraction Perfected**\n" + " | ".join(stats)
                  
         with open(out_name, "rb") as f:
             await update.message.reply_document(document=f, caption=caption, parse_mode=ParseMode.MARKDOWN)
@@ -288,4 +279,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-    
+        
