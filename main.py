@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🤖 Telegram HTML to TXT Converter Bot - GOD MODE
-✨ Smart Context Extraction: Finds real titles even if link says "View PDF"
-🚀 Deep Decryption for Encrypted Batches
+🤖 Telegram HTML to TXT Converter Bot - GOD MODE PRO
+✨ Logic: Extracts Titles from JS Arguments & Parent Containers
+🚀 Fixes: 'Original' names, Missing PDF names, Junk Links
 """
 
 import os
@@ -11,7 +11,7 @@ import re
 import logging
 import base64
 import asyncio
-from bs4 import BeautifulSoup, NavigableString
+from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.constants import ParseMode
@@ -29,18 +29,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class GodModeParser:
-    """🧠 Smart Parser that understands HTML structure to find Names & Links"""
-    
+class UltraParser:
     def __init__(self):
-        # Generic words to ignore in titles
-        self.generic_keywords = [
+        # Ignore these words in titles if they appear alone
+        self.ignore_titles = [
             'view', 'play', 'download', 'watch', 'pdf', 'notes', 'video', 
-            'click here', 'open', 'attachment', 'class png', 'live'
+            'click here', 'open', 'original', 'quality', '360p', '480p', '720p', '1080p'
         ]
-        
+        # Valid extensions for OTHERS category (to avoid junk)
+        self.valid_other_exts = ['.zip', '.rar', '.7z', '.tar', '.iso', '.apk', '.exe']
+
     def xor_decrypt(self, encoded_b64, key):
-        """Standard XOR Decryption for Selection Batch & others"""
         try:
             encrypted_data = base64.b64decode(encoded_b64).decode('latin1')
             result = []
@@ -49,151 +48,151 @@ class GodModeParser:
                 char_code = ord(encrypted_data[i]) ^ ord(key[i % key_len])
                 result.append(chr(char_code))
             return base64.b64decode("".join(result)).decode('utf-8')
-        except Exception as e:
-            return None
+        except: return None
 
     def extract_secret_key(self, html_content):
-        """Extracts secret key components from JS"""
-        default_key = "TusharSuperSecreT2025!"
+        default = "TusharSuperSecreT2025!"
         try:
+            p4 = re.search(r'let\s+P4\s*=\s*["\']([^"\']+)["\']', html_content)
             p1 = re.search(r'let\s+P1\s*=\s*["\']([^"\']+)["\']', html_content)
             p2 = re.search(r'let\s+P2\s*=\s*["\']([^"\']+)["\']', html_content)
             p3 = re.search(r'let\s+P3_Reversed\s*=\s*["\']([^"\']+)["\']', html_content)
-            p4 = re.search(r'let\s+P4\s*=\s*["\']([^"\']+)["\']', html_content)
-            
-            if p1 and p2 and p3 and p4:
+            if p4 and p1 and p2 and p3:
                 return f"{p4.group(1)}{p1.group(1)}{p2.group(1)}{p3.group(1)[::-1]}"
-            return default_key
-        except:
-            return default_key
+            return default
+        except: return default
 
-    def get_smart_title(self, element, default_text="Untitled"):
-        """
-        🚀 The Magic Function:
-        Looks at the element, then its neighbors, then its parent to find the REAL name.
-        """
-        # 1. Get own text
-        text = element.get_text(" ", strip=True)
+    def clean_title(self, text):
+        if not text: return "Untitled"
         
-        # 2. Check if text is 'Generic' (like "View PDF") or empty
-        is_generic = False
-        if not text or len(text) < 4:
-            is_generic = True
-        else:
-            if any(kw in text.lower() for kw in self.generic_keywords):
-                # But allow if it has numbers or specific details (e.g. "Class 5 PDF")
-                if len(text) < 20: 
-                    is_generic = True
-
-        if not is_generic:
-            return self.clean_text(text)
-
-        # 3. Context Search (If generic)
+        # 1. Remove Symbols that confuse extraction bots
+        # Replace | _ with space
+        text = text.replace('|', ' ').replace('_', ' ').replace(':', ' - ')
         
-        # A) Look for previous sibling (often <strong>Name</strong> <a...>View</a>)
-        prev = element.find_previous_sibling()
-        if prev:
-            prev_text = prev.get_text(" ", strip=True)
-            if len(prev_text) > 3:
-                return self.clean_text(prev_text)
-
-        # B) Look at Parent's text (ignoring the button text itself)
-        parent = element.parent
-        if parent:
-            # Get parent text but remove the link's own text from it to avoid duplication
-            full_parent_text = parent.get_text(" ", strip=True)
-            # Simple heuristic: If parent text is longer, use it
-            if len(full_parent_text) > len(text) + 3:
-                # Remove the generic word from parent text
-                clean_parent = full_parent_text.replace(text, "").strip()
-                if len(clean_parent) > 3:
-                    return self.clean_text(clean_parent)
-        
-        # C) Look for nearest Header/Strong preceding the element
-        nearest_strong = element.find_previous(['strong', 'h3', 'h4', 'h5', 'b', 'span'])
-        if nearest_strong:
-            return self.clean_text(nearest_strong.get_text(" ", strip=True))
-
-        return default_text
-
-    def clean_text(self, text):
-        # Basic cleanup
+        # 2. Basic Cleanup
         text = re.sub(r'\s+', ' ', text).strip()
-        # Remove trailing colons or dashes
-        text = text.strip(':-| ')
-        return text
+        
+        # 3. Remove Button keywords from the end or start
+        lower_text = text.lower()
+        for word in self.ignore_titles:
+            # If the title IS just the word, ignore it (handled later)
+            if lower_text == word: return "" 
+            # Remove "Download" from "Download Physics Notes"
+            text = re.sub(f'(?i)^{word}\s+', '', text)
+            text = re.sub(f'(?i)\s+{word}$', '', text)
+            
+        return text.strip()
+
+    def get_title_from_js(self, onclick_text):
+        """Extracts title from function calls like openVideoPopup(id, url, 'TITLE')"""
+        if not onclick_text: return None
+        
+        # Pattern for 3 arguments inside quotes
+        # Looks for: func('arg1', 'arg2', 'TARGET')
+        matches = re.findall(r"['\"]([^'\"]+)['\"]", onclick_text)
+        if len(matches) >= 3:
+            # Usually the 3rd arg is title in these templates
+            possible_title = matches[2] 
+            if len(possible_title) > 3 and not possible_title.startswith('http'):
+                return self.clean_title(possible_title)
+        return None
+
+    def get_best_title(self, tag):
+        """Finds the best title by looking at JS, siblings, or parent"""
+        
+        # Priority 1: JS Argument (Highest accuracy for Aman Vashisth files)
+        if tag.has_attr('onclick'):
+            js_title = self.get_title_from_js(tag['onclick'])
+            if js_title: return js_title
+
+        # Priority 2: Tag's own text (if it's not generic)
+        text = self.clean_title(tag.get_text(" ", strip=True))
+        if text and text.lower() not in self.ignore_titles:
+            return text
+
+        # Priority 3: Previous Sibling (e.g. <strong>Title</strong> <a>Link</a>)
+        prev = tag.find_previous_sibling()
+        if prev:
+            prev_text = self.clean_title(prev.get_text(" ", strip=True))
+            if len(prev_text) > 4: return prev_text
+
+        # Priority 4: Parent Container Text (The "Card" method)
+        # Finds the longest text in the parent div that ISN'T the button text
+        parent = tag.parent
+        if parent:
+            parent_text = parent.get_text(" ", strip=True)
+            # Remove the button text from parent text to leave only the title
+            button_text = tag.get_text(" ", strip=True)
+            clean_parent = parent_text.replace(button_text, "").strip()
+            title_candidate = self.clean_title(clean_parent)
+            if len(title_candidate) > 4: return title_candidate
+
+        return "Untitled_Topic"
 
     def parse(self, html_content):
-        # 1. Decrypt Loop (Handle multiple layers if needed, but usually 1)
+        # Decryption Phase
         if "encodedContent" in html_content:
             key = self.extract_secret_key(html_content)
             match = re.search(r"encodedContent\s*=\s*['\"]([^'\"]+)['\"]", html_content)
             if match:
-                decrypted = self.xor_decrypt(match.group(1), key)
-                if decrypted: html_content = decrypted
+                dec = self.xor_decrypt(match.group(1), key)
+                if dec: html_content = dec
 
-        soup = BeautifulSoup(html_content, 'lxml') # or 'html.parser'
-        
-        links_data = [] # List of dicts: {'title':..., 'url':..., 'type':...}
+        soup = BeautifulSoup(html_content, 'lxml')
+        links_data = []
         seen_urls = set()
 
-        # 2. Universal Element Scanner
-        # We look for ANY element that might have a link
-        targets = soup.find_all(['a', 'button', 'div', 'li', 'span'])
-        
-        for tag in targets:
+        # Find all clickable elements
+        elements = soup.find_all(['a', 'button', 'div', 'span'])
+
+        for tag in elements:
             url = None
             
-            # A) Check href
+            # Extract URL
             if tag.name == 'a' and tag.get('href'):
                 url = tag.get('href')
-            
-            # B) Check onclick (The juicy stuff for encrypted batches)
-            elif tag.get('onclick'):
-                # Extract URL from onclick="...('URL')..."
-                # Supports single/double quotes, http/https
-                onclick_match = re.search(r"['\"](https?://[^'\"]+)['\"]", tag.get('onclick'))
-                if onclick_match:
-                    url = onclick_match.group(1)
-            
-            # Process if URL found
+            elif tag.has_attr('onclick'):
+                # Extract HTTP/HTTPS url
+                u_match = re.search(r"['\"](https?://[^'\"]+)['\"]", tag['onclick'])
+                if u_match: url = u_match.group(1)
+
             if url and url.startswith('http') and url not in seen_urls:
+                # FILTER JUNK
+                if any(x in url for x in ['w3.org', 'cloudflare', 'javascript:', 'jquery']):
+                    continue
+                
                 seen_urls.add(url)
+                title = self.get_best_title(tag)
                 
-                # SMART TITLE EXTRACTION
-                title = self.get_smart_title(tag)
+                # Categorize
+                l_type = 'other'
+                u_low = url.lower()
                 
-                # Determine Type
-                l_type = "other"
-                u_lower = url.lower()
-                if any(x in u_lower for x in ['.pdf', 'drive.google', 'doc', 'ppt']):
-                    l_type = "pdf"
-                elif any(x in u_lower for x in ['.mp4', '.m3u8', 'youtube', 'youtu.be', 'vimeo', 'playlist']):
-                    l_type = "video"
-                # If title contains keywords, override type
-                elif 'pdf' in title.lower() or 'notes' in title.lower():
-                    l_type = "pdf"
-                
+                if any(x in u_low for x in ['.mp4', '.m3u8', 'youtu', 'vimeo', 'playlist', 'manifest']):
+                    l_type = 'video'
+                elif any(x in u_low for x in ['.pdf', 'drive.google', 'doc', 'ppt', 'notes']):
+                    l_type = 'pdf'
+                elif any(x in u_low for x in ['.jpg', '.png', '.jpeg']):
+                    l_type = 'image' # New Category
+                # Check for valid OTHER files (zips etc)
+                elif any(x in u_low for x in self.valid_other_exts):
+                    l_type = 'other'
+                else:
+                    # If it's a generic web link, we skip it unless user wants EVERYTHING
+                    # For now, skipping generic html links to avoid clutter
+                    continue 
+
                 links_data.append({'title': title, 'url': url, 'type': l_type})
-
-        # 3. Fallback: Regex for loose strings (Only if soup failed for a URL)
-        # Sometimes URLs are just in script tags
-        raw_urls = re.findall(r'(https?://[^\s<>"\';]+)', html_content)
-        for r_url in raw_urls:
-            if r_url not in seen_urls:
-                # Basic filter to avoid garbage JS urls
-                if not any(x in r_url for x in ['.js', '.css', 'w3.org']):
-                    seen_urls.add(r_url)
-                    links_data.append({'title': "Hidden Link (Regex)", 'url': r_url, 'type': "other"})
-
+        
         return links_data
 
-    def generate_output(self, file_name, links):
-        lines = [f"📂 Source: {file_name}", "="*40, ""]
+    def generate_txt(self, filename, links):
+        lines = [f"📂 Source: {filename}", "="*40, ""]
         
-        # Categorize for display
+        # Grouping
         videos = [x for x in links if x['type'] == 'video']
         pdfs = [x for x in links if x['type'] == 'pdf']
+        images = [x for x in links if x['type'] == 'image']
         others = [x for x in links if x['type'] == 'other']
         
         if videos:
@@ -205,6 +204,11 @@ class GodModeParser:
             lines.append(f"📚 PDFS / NOTES ({len(pdfs)})")
             for p in pdfs: lines.append(f"{p['title']} : {p['url']}")
             lines.append("")
+
+        if images:
+            lines.append(f"🖼 IMAGES ({len(images)})")
+            for i in images: lines.append(f"{i['title']} : {i['url']}")
+            lines.append("")
             
         if others:
             lines.append(f"🔗 OTHERS ({len(others)})")
@@ -212,51 +216,48 @@ class GodModeParser:
             
         return "\n".join(lines)
 
-# ==================== BOT HANDLERS ====================
-parser = GodModeParser()
+# ==================== BOT ====================
+parser = UltraParser()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("😎 **God Mode Active**\nSend HTML. I will find real names and ALL links.")
+    await update.message.reply_text("🔥 **Bot Ready**\nSend HTML. I will extract Full Names and Links.")
 
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
     if not doc.file_name.lower().endswith(('.html', '.htm', '.txt')):
-        await update.message.reply_text("❌ Send HTML file.")
+        await update.message.reply_text("❌ Only HTML/TXT allowed.")
         return
 
-    status = await update.message.reply_text("🔍 **Analyzing Structure...**")
+    msg = await update.message.reply_text("⚙️ **Processing...**")
     
     try:
         f = await context.bot.get_file(doc.file_id)
-        content = await f.download_as_bytearray()
-        html_text = content.decode('utf-8', errors='ignore')
+        c = await f.download_as_bytearray()
+        content = c.decode('utf-8', errors='ignore')
         
-        links = parser.parse(html_text)
+        links = parser.parse(content)
         
         if not links:
-            await status.edit_text("❌ No links found.")
+            await msg.edit_text("❌ No valid links found.")
             return
             
-        output = parser.generate_output(doc.file_name, links)
-        
+        out_txt = parser.generate_txt(doc.file_name, links)
         out_name = f"{doc.file_name}_Fixed.txt"
+        
         with open(out_name, "w", encoding="utf-8") as f:
-            f.write(output)
+            f.write(out_txt)
             
         with open(out_name, "rb") as f:
-            await update.message.reply_document(
-                document=f,
-                caption=f"✅ **Extracted Successfully**\nTotal: {len(links)}",
-                parse_mode=ParseMode.MARKDOWN
-            )
+            await update.message.reply_document(document=f, caption="✅ Done")
+            
         os.remove(out_name)
-        await status.delete()
+        await msg.delete()
         
     except Exception as e:
         logger.error(e)
-        await status.edit_text("❌ Error processing file.")
+        await msg.edit_text("❌ Error.")
 
-# ==================== SERVER ====================
+# ==================== MAIN ====================
 async def health(r): return web.Response(text="OK")
 
 async def main():
@@ -270,11 +271,10 @@ async def main():
     if not BOT_TOKEN: return
     application = Application.builder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    application.add_handler(MessageHandler(filters.Document.ALL, handle_doc))
     
-    if WEBHOOK_URL:
-        await application.bot.set_webhook(f"{WEBHOOK_URL}/webhook")
-        
+    if WEBHOOK_URL: await application.bot.set_webhook(f"{WEBHOOK_URL}/webhook")
+    
     await application.initialize()
     await application.start()
     await application.updater.start_polling(drop_pending_updates=True)
@@ -282,4 +282,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-                
