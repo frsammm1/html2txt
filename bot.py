@@ -1,172 +1,174 @@
 import os
 import re
-import base64
-import requests
-from functools import wraps
+import threading
+import http.server
+import socketserver
+import tempfile
+from collections import defaultdict
 from bs4 import BeautifulSoup
-from telegram import Update
+
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputFile
+)
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters
 )
 
-# ================== CONFIG ==================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+ACTIVE_JOBS = set()
 
-# ================== ADMIN ONLY ==================
-def admin_only(func):
-    @wraps(func)
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if update.effective_user.id != ADMIN_ID:
-            await update.message.reply_text("❌ Access denied")
-            return
-        return await func(update, context)
-    return wrapper
+# ------------------ RENDER PORT FIX ------------------
+def start_dummy_server():
+    port = int(os.environ.get("PORT", 10000))
 
-# ================== COMMANDS ==================
-@admin_only
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "✅ Bot Ready\n"
-        "Send any .html file\n"
-        "I will extract Videos / PDFs / Tests properly."
-    )
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"Bot alive")
 
-@admin_only
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📌 Usage:\n"
-        "1) Upload HTML file\n"
-        "2) Bot decrypts & parses deeply\n"
-        "3) Returns clean output.txt"
-    )
+    with socketserver.TCPServer(("0.0.0.0", port), Handler) as httpd:
+        print(f"[OK] Dummy server on port {port}")
+        httpd.serve_forever()
 
-# ================== DECRYPT ==================
-def xor_decrypt(data: bytes, key: str) -> bytes:
-    k = key.encode()
-    return bytes(b ^ k[i % len(k)] for i, b in enumerate(data))
+# ------------------ HELPERS ------------------
+JUNK_WORDS = [
+    "play", "watch", "download", "original", "quality",
+    "360p", "480p", "720p", "1080p", "hls"
+]
 
-def decrypt_if_needed(html: str) -> str:
-    if "encodedContent" not in html:
-        return html
-    try:
-        enc = re.search(r"encodedContent\s*=\s*'([^']+)'", html).group(1)
-        P1 = re.search(r'P1\s*=\s*"([^"]+)"', html).group(1)
-        P2 = re.search(r'P2\s*=\s*"([^"]+)"', html).group(1)
-        P3 = re.search(r'P3_Reversed\s*=\s*"([^"]+)"', html).group(1)
-        P4 = re.search(r'P4\s*=\s*"([^"]+)"', html).group(1)
+def clean_title(text: str) -> str:
+    text = re.sub(r'^\s*\d+[\.\)]\s*', '', text)
+    for w in JUNK_WORDS:
+        text = re.sub(rf'\b{w}\b', '', text, flags=re.I)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip() or "Untitled"
 
-        key = P4 + P1 + P2 + P3[::-1]
-        raw = base64.b64decode(re.sub(r'[^A-Za-z0-9+/=]', '', enc))
-        step1 = xor_decrypt(raw, key).decode(errors="ignore")
-        clean = base64.b64decode(re.sub(r'[^A-Za-z0-9+/=]', '', step1))
-        return clean.decode("utf-8", errors="ignore")
-    except Exception:
-        return html
-
-# ================== HELPERS ==================
-JUNK = ["play", "original", "watch", "download", "view"]
-
-def clean_title(t: str) -> str:
-    t = re.sub(r'^\d+[\.\)]*', '', t)
-    for w in JUNK:
-        t = re.sub(rf'\b{w}\b', '', t, flags=re.I)
-    return re.sub(r'\s+', ' ', t).strip(" -:\n")
-
-def link_alive(url: str) -> bool:
-    try:
-        r = requests.head(url, timeout=5, allow_redirects=True)
-        return r.status_code < 400
-    except:
-        return False
-
-def classify(url: str, title: str):
-    u = url.lower()
-    if any(x in u for x in [".mp4", ".m3u8", "player"]):
+def classify(url: str) -> str:
+    url = url.lower()
+    if any(x in url for x in [".m3u8", ".mp4", "player", "stream"]):
         return "VIDEOS"
-    if u.endswith(".pdf") or "drive.google" in u:
-        if re.search(r'\b(test|quiz)\b', title, re.I):
-            return "TESTS"
+    if ".pdf" in url or "drive.google" in url:
         return "PDFS"
-    if any(x in u for x in [".jpg", ".png", ".jpeg"]):
-        return "IMAGES"
-    if re.search(r'\b(test|quiz)\b', title, re.I):
+    if any(x in url for x in ["quiz", "test", "mock"]):
         return "TESTS"
-    return None
+    if any(x in url for x in [".jpg", ".png", ".jpeg"]):
+        return "IMAGES"
+    return "OTHERS"
 
-# ================== PARSER ==================
-def parse_html(html: str):
+# ------------------ HTML PARSER ------------------
+def parse_html(html: str, stop_check):
     soup = BeautifulSoup(html, "lxml")
-    out = {"VIDEOS": {}, "PDFS": {}, "TESTS": {}, "IMAGES": {}}
 
-    for li in soup.find_all("li"):
-        txt = clean_title(li.get_text(" ", strip=True))
-        a = li.find("a", href=True)
-        if not a:
+    results = defaultdict(dict)  # {category: {title: url}}
+
+    clickable = soup.find_all(["a", "button", "div"])
+
+    total = len(clickable)
+    for idx, tag in enumerate(clickable, start=1):
+        if stop_check():
+            break
+
+        url = None
+
+        if tag.name == "a" and tag.get("href"):
+            url = tag.get("href")
+
+        if tag.name == "button":
+            onclick = tag.get("onclick", "")
+            m = re.search(r"(https?://[^'\" )]+)", onclick)
+            if m:
+                url = m.group(1)
+
+        if not url:
             continue
 
-        url = a["href"]
-        if url.startswith("javascript"):
-            org = li.find("a", string=re.compile("Original", re.I))
-            if org and org.has_attr("href"):
-                url = org["href"]
+        container = tag.find_parent("div")
+        raw_text = container.get_text(" ", strip=True) if container else tag.get_text()
+        title = clean_title(raw_text)
 
-        title = clean_title(a.get_text() or txt)
-        if not title or not link_alive(url):
-            continue
+        category = classify(url)
+        if title not in results[category]:
+            results[category][title] = url
 
-        cat = classify(url, title)
-        if cat and title not in out[cat]:
-            out[cat][title] = url
+    return results
 
-    return out
+# ------------------ BOT COMMANDS ------------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    await update.message.reply_text(
+        "✅ Bot Ready\n\nSend any .html file\n"
+        "• Progress shown\n"
+        "• Downloadable .txt output\n"
+        "• STOP supported"
+    )
 
-# ================== FILE HANDLER ==================
-@admin_only
 async def handle_html(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    doc = update.message.document
-    if not doc.file_name.lower().endswith(".html"):
-        await update.message.reply_text("❌ Only .html files allowed")
+    if update.effective_user.id != ADMIN_ID:
         return
 
-    path = doc.file_name
-    tg_file = await context.bot.get_file(doc.file_id)
-    await tg_file.download_to_drive(path)
+    job_id = update.message.id
+    ACTIVE_JOBS.add(job_id)
 
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        html = f.read()
+    progress = await update.message.reply_text("⏳ Parsing HTML… 0%")
 
-    html = decrypt_if_needed(html)
-    data = parse_html(html)
+    html_bytes = await update.message.document.get_file()
+    html = (await html_bytes.download_as_bytearray()).decode(errors="ignore")
 
-    lines = []
-    for emoji, cat in [("🎬", "VIDEOS"), ("📚", "PDFS"), ("📝", "TESTS"), ("🖼️", "IMAGES")]:
-        if not data[cat]:
-            continue
-        lines.append(f"{emoji} {cat} ({len(data[cat])})")
-        lines.append("-" * 30)
-        for t, u in data[cat].items():
-            lines.append(f"{t} : {u}")
-        lines.append("")
+    def stopped():
+        return job_id not in ACTIVE_JOBS
 
-    with open("output.txt", "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
+    results = parse_html(html, stopped)
 
-    await context.bot.send_document(update.effective_chat.id, open("output.txt", "rb"))
+    if stopped():
+        await progress.edit_text("❌ Job stopped")
+        return
 
-# ================== MAIN (FIXED) ==================
+    # -------- FILE GENERATION --------
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".txt", mode="w", encoding="utf-8") as f:
+        for category, items in results.items():
+            f.write(f"\n📂 {category} ({len(items)})\n")
+            f.write("-" * 40 + "\n")
+            for title, url in items.items():
+                f.write(f"{title} : {url}\n")
+
+        output_path = f.name
+
+    ACTIVE_JOBS.discard(job_id)
+
+    await progress.edit_text("✅ Completed\n📤 Sending file…")
+
+    await update.message.reply_document(
+        document=InputFile(output_path, filename="converted_links.txt"),
+        caption="✅ Download your extracted links"
+    )
+
+async def stop_job(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    ACTIVE_JOBS.clear()
+    await query.answer("Stopped")
+    await query.edit_message_text("❌ Stopped by user")
+
+# ------------------ MAIN ------------------
 def main():
+    threading.Thread(target=start_dummy_server, daemon=True).start()
+
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_html))
+    app.add_handler(MessageHandler(filters.Document.HTML, handle_html))
+    app.add_handler(CallbackQueryHandler(stop_job, pattern="^stop$"))
 
-    print("✅ Bot running in POLLING mode (Render safe)")
+    print("[OK] Bot polling started")
     app.run_polling()
 
 if __name__ == "__main__":
